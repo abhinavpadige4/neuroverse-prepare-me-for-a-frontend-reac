@@ -1,260 +1,207 @@
-"""
-Optimistic Cart Implementation for Swiggy Frontend Interview Prep
+// Optimistic Cart Update — React + TypeScript
+// Pattern: update UI immediately, call API, rollback on failure, show toast
 
-Pattern: Update local state immediately, roll back on API failure, show toast.
-"""
+import React, { useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 
-import json
-from dataclasses import dataclass, field
-from typing import Optional, Callable
-from enum import Enum
+// ---------- Types ----------
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  qty: number;
+}
 
+interface Toast {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
 
-class ToastType(Enum):
-    SUCCESS = "success"
-    ERROR = "error"
-    INFO = "info"
-
-
-@dataclass
-class CartItem:
-    id: str
-    name: str
-    price: float
-    quantity: int = 1
-
-
-@dataclass
-class Toast:
-    message: str
-    type: ToastType
-    visible: bool = True
-
-
-@dataclass
-class CartState:
-    items: list = field(default_factory=list)
-    loading: bool = False
-    toasts: list = field(default_factory=list)
-
-
-class OptimisticCart:
-    """Python simulation of the optimistic cart pattern."""
-
-    def __init__(self, api_client=None):
-        self.state = CartState()
-        self._api = api_client or self._default_api
-        self._toast_timeout = 3000
-
-    def _default_api(self, item: CartItem) -> bool:
-        return True
-
-    def add_to_cart(self, item: CartItem) -> CartState:
-        """Optimistically add item, rollback on failure."""
-        previous_items = list(self.state.items)
-
-        # 1. Optimistic update
-        existing = next((i for i in self.state.items if i.id == item.id), None)
-        if existing:
-            existing.quantity += item.quantity
-        else:
-            self.state.items.append(item)
-
-        # 2. Attempt API call
-        try:
-            success = self._api(item)
-            if not success:
-                raise Exception("API returned failure")
-        except Exception as e:
-            # 3. Rollback
-            self.state.items = previous_items
-            self._show_toast(f"Failed to add {item.name}: {e}", ToastType.ERROR)
-            return self.state
-
-        # 4. Success toast
-        self._show_toast(f"{item.name} added to cart!", ToastType.SUCCESS)
-        return self.state
-
-    def _show_toast(self, message: str, toast_type: ToastType):
-        self.state.toasts.append(Toast(message=message, type=toast_type))
-
-    def dismiss_toast(self, index: int):
-        if 0 <= index < len(self.state.toasts):
-            self.state.toasts[index].visible = False
-
-
-# ============================================================
-# React Implementation (JavaScript) - Full Component Code
-# ============================================================
-
-REACT_IMPLEMENTATION = r'''// OptimisticCart.jsx
-import React, { useState, useCallback, useRef } from "react";
-import { ToastContainer, toast } from "react-toastify";
-import "react-toastify/dist/ReactToastify.css";
-
-// API service
-const api = {
-  addToCart: async (item) => {
-    const res = await fetch("/api/cart/add", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(item),
-    });
-    if (!res.ok) throw new Error("Failed to add item");
-    return res.json();
-  },
+// ---------- Toast Component ----------
+const ToastContainer: React.FC<{ toasts: Toast[]; remove: (id: number) => void }> = ({ toasts, remove }) => {
+  return createPortal(
+    <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 9999 }}>
+      {toasts.map(t => (
+        <div
+          key={t.id}
+          onClick={() => remove(t.id)}
+          style={{
+            padding: '12px 20px',
+            margin: '8px 0',
+            borderRadius: 8,
+            color: '#fff',
+            background: t.type === 'success' ? '#22c55e' : '#ef4444',
+            cursor: 'pointer',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            animation: 'slideIn 0.3s ease',
+          }}
+        >
+          {t.message}
+        </div>
+      ))}
+    </div>,
+    document.body
+  );
 };
 
-export default function OptimisticCart({ items }) {
-  const [cart, setCart] = useState([]);
-  const [pendingIds, setPendingIds] = useState(new Set());
-  const abortRef = useRef(new AbortController());
+// ---------- Optimistic Cart Hook ----------
+function useOptimisticCart() {
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastId = useRef(0);
 
-  const addToCart = useCallback(async (item) => {
-    // 1. Save previous state for rollback
-    const previousCart = [...cart];
+  const showToast = useCallback((message: string, type: 'success' | 'error') => {
+    const id = ++toastId.current;
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  }, []);
 
-    // 2. Optimistic update - update UI immediately
-    setCart((prev) => {
-      const existing = prev.find((i) => i.id === item.id);
-      if (existing) {
-        return prev.map((i) =>
-          i.id === item.id ? { ...i, quantity: i.quantity + 1 } : i
-        );
+  const removeToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const addToCart = useCallback(
+    async (item: Omit<CartItem, 'qty'>) => {
+      // 1. Snapshot previous state for rollback
+      const prevCart = cart;
+
+      // 2. Optimistic update — add or increment qty immediately
+      setCart(prev => {
+        const existing = prev.find(i => i.id === item.id);
+        if (existing) {
+          return prev.map(i => (i.id === item.id ? { ...i, qty: i.qty + 1 } : i));
+        }
+        return [...prev, { ...item, qty: 1 }];
+      });
+
+      showToast(`Added ${item.name} to cart`, 'success');
+
+      // 3. Call API — simulate network
+      try {
+        await fakeApiAddToCart(item);
+      } catch (err) {
+        // 4. Rollback on failure
+        setCart(prevCart);
+        showToast(`Failed to add ${item.name}. Reverted.`, 'error');
       }
-      return [...prev, { ...item, quantity: 1 }];
-    });
+    },
+    [cart, showToast]
+  );
 
-    // 3. Mark as pending
-    setPendingIds((prev) => new Set(prev).add(item.id));
+  const removeFromCart = useCallback((id: string) => {
+    setCart(prev => prev.filter(i => i.id !== id));
+  }, []);
 
-    try {
-      // 4. Call API
-      await api.addToCart(item);
+  const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 
-      // 5. Success toast
-      toast.success(`${item.name} added to cart!`, {
-        position: "top-right",
-        autoClose: 3000,
-      });
-    } catch (error) {
-      // 6. Rollback on failure
-      setCart(previousCart);
+  return { cart, total, addToCart, removeFromCart, toasts, removeToast };
+}
 
-      // 7. Error toast
-      toast.error(`Failed to add ${item.name}. Please try again.`, {
-        position: "top-right",
-        autoClose: 4000,
-      });
-    } finally {
-      // 8. Clear pending state
-      setPendingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(item.id);
-        return next;
-      });
-    }
-  }, [cart]);
+// ---------- Simulated API (replace with real fetch) ----------
+function fakeApiAddToCart(item: Omit<CartItem, 'qty'>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      // 30% failure rate for demo
+      if (Math.random() < 0.3) {
+        reject(new Error('Server error'));
+      } else {
+        resolve();
+      }
+    }, 800);
+  });
+}
+
+// ---------- Cart UI Component ----------
+const Cart: React.FC = () => {
+  const { cart, total, addToCart, removeFromCart, toasts, removeToast } = useOptimisticCart();
+
+  const sampleItems = [
+    { id: '1', name: 'Paneer Tikka', price: 249 },
+    { id: '2', name: 'Butter Chicken', price: 349 },
+    { id: '3', name: 'Garlic Naan', price: 49 },
+    { id: '4', name: 'Mango Lassi', price: 99 },
+  ];
 
   return (
-    <div className="cart-container">
-      <ToastContainer />
-      <h2>Cart ({cart.reduce((s, i) => s + i.quantity, 0)} items)</h2>
-      <ul>
-        {cart.map((item) => (
-          <li key={item.id} className={pendingIds.has(item.id) ? "pending" : ""}>
-            {item.name} x{item.quantity} - Rs.{item.price * item.quantity}
-          </li>
-        ))}
-      </ul>
-      <div className="menu">
-        {items.map((item) => (
+    <div style={{ fontFamily: 'sans-serif', maxWidth: 600, margin: '40px auto', padding: 20 }}>
+      <h1>Swiggy Cart — Optimistic Updates</h1>
+
+      <h2>Add Items</h2>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {sampleItems.map(item => (
           <button
             key={item.id}
             onClick={() => addToCart(item)}
-            disabled={pendingIds.has(item.id)}
+            style={{ padding: '10px 16px', cursor: 'pointer', borderRadius: 6, border: '1px solid #ccc' }}
           >
-            Add {item.name} (Rs.{item.price})
+            {item.name} — ₹{item.price}
           </button>
         ))}
       </div>
+
+      <h2>Cart ({cart.length} items)</h2>
+      {cart.length === 0 ? (
+        <p style={{ color: '#888' }}>Cart is empty</p>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ borderBottom: '2px solid #eee' }}>
+              <th style={{ textAlign: 'left', padding: 8 }}>Item</th>
+              <th style={{ padding: 8 }}>Qty</th>
+              <th style={{ padding: 8 }}>Price</th>
+              <th style={{ padding: 8 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {cart.map(item => (
+              <tr key={item.id} style={{ borderBottom: '1px solid #eee' }}>
+                <td style={{ padding: 8 }}>{item.name}</td>
+                <td style={{ padding: 8, textAlign: 'center' }}>{item.qty}</td>
+                <td style={{ padding: 8, textAlign: 'center' }}>₹{item.price * item.qty}</td>
+                <td style={{ padding: 8, textAlign: 'center' }}>
+                  <button onClick={() => removeFromCart(item.id)} style={{ color: 'red', cursor: 'pointer' }}>
+                    ✕
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2} style={{ padding: 8, textAlign: 'right', fontWeight: 'bold' }}>Total:</td>
+              <td colSpan={2} style={{ padding: 8, fontWeight: 'bold' }}>₹{total}</td>
+            </tr>
+          </tfoot>
+        </table>
+      )}
+
+      <ToastContainer toasts={toasts} remove={removeToast} />
     </div>
   );
-}
-'''
+};
 
+export default Cart;
 
-# ============================================================
-# Tests
-# ============================================================
+// ---------- Key Interview Talking Points ----------
+/*
+1. WHY OPTIMISTIC?
+   - Reduces perceived latency; user sees instant feedback
+   - Common in food delivery (Swiggy/Zomato) where cart adds are frequent
 
-def test_optimistic_add_success():
-    cart = OptimisticCart()
-    item = CartItem(id="1", name="Biryani", price=299.0)
-    state = cart.add_to_cart(item)
-    assert len(state.items) == 1
-    assert state.items[0].name == "Biryani"
-    assert state.items[0].quantity == 1
-    assert len(state.toasts) == 1
-    assert state.toasts[0].type == ToastType.SUCCESS
-    print("PASS: test_optimistic_add_success")
+2. ROLLBACK STRATEGY
+   - Snapshot state before mutation (prevCart)
+   - On API failure, restore snapshot
+   - Show error toast so user knows the action didn't persist
 
+3. EDGE CASES
+   - Rapid double-clicks: each call snapshots independently
+   - Concurrent adds: functional setState ensures correct merges
+   - Network timeout: consider AbortController for real apps
 
-def test_optimistic_add_rollback():
-    def failing_api(item):
-        raise Exception("Network error")
-
-    cart = OptimisticCart(api_client=failing_api)
-    item = CartItem(id="2", name="Pizza", price=199.0)
-    state = cart.add_to_cart(item)
-    assert len(state.items) == 0, "Should have rolled back"
-    assert len(state.toasts) == 1
-    assert state.toasts[0].type == ToastType.ERROR
-    print("PASS: test_optimistic_add_rollback")
-
-
-def test_optimistic_increment_quantity():
-    cart = OptimisticCart()
-    item = CartItem(id="3", name="Dosa", price=99.0)
-    cart.add_to_cart(item)
-    cart.add_to_cart(item)
-    assert len(cart.state.items) == 1
-    assert cart.state.items[0].quantity == 2
-    print("PASS: test_optimistic_increment_quantity")
-
-
-def test_rollback_preserves_previous_state():
-    def failing_api(item):
-        raise Exception("Server down")
-
-    cart = OptimisticCart(api_client=failing_api)
-    good_item = CartItem(id="4", name="Samosa", price=49.0)
-    cart.add_to_cart(good_item)
-    assert len(cart.state.items) == 1
-
-    bad_item = CartItem(id="5", name="Cake", price=499.0)
-    cart.add_to_cart(bad_item)
-    assert len(cart.state.items) == 1
-    assert cart.state.items[0].name == "Samosa"
-    print("PASS: test_rollback_preserves_previous_state")
-
-
-def test_toast_dismiss():
-    cart = OptimisticCart()
-    item = CartItem(id="6", name="Chai", price=20.0)
-    cart.add_to_cart(item)
-    assert cart.state.toasts[0].visible is True
-    cart.dismiss_toast(0)
-    assert cart.state.toasts[0].visible is False
-    print("PASS: test_toast_dismiss")
-
-
-if __name__ == "__main__":
-    test_optimistic_add_success()
-    test_optimistic_add_rollback()
-    test_optimistic_increment_quantity()
-    test_rollback_preserves_previous_state()
-    test_toast_dismiss()
-    print("\nAll tests passed!")
-    print("\n--- React Implementation ---")
-    print(REACT_IMPLEMENTATION)
+4. REAL-WORLD (Swiggy)
+   - Use Redux Toolkit createAsyncThunk or RTK Query for state management
+   - Persist cart to localStorage as backup
+   - Retry logic with exponential backoff
+   - Conflict resolution if server state differs (e.g., item sold out)
+*/
